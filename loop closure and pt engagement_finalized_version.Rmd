@@ -1,0 +1,576 @@
+---
+title: "Continuation of Loop Closure and Pt Engagement"
+author: "Cancan Zhang"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+
+---
+
+```{r setup, include=TRUE}
+
+packages <- c("dplyr","magrittr","tidyverse","readxl","sqldf","openxlsx","readr","XML","kableExtra","htmlTable","tableone","janitor","DiagrammeR","rsvg","choroplethr","choroplethrMaps","superheat","blockrand","randomForest","tree","rpart.plot","broom","ggmap","zoo","cluster","lubridate","naniar","table1","corrplot","lme4","dataMeta","flextable","magrittr","officer","forecast","ICC","lavaan","sjstats","devtools","survival","survminer","gtsummary","reReg","hrbrthemes","ggpubr","rstatix","lmerTest","sf",'mice','broom.mixed',"DHARMa","ggplot2","patchwork",'ggmice','zipcodeR','stringr','usmap','multcomp','emmeans')
+
+# Install any missing packages from the list above
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+lapply(packages,require,character.only=T)
+
+file_path='H:\\Work\\loop closure and pt engagement\\data\\'
+out_path='H:\\Work\\loop closure and pt engagement\\analysis\\'
+
+
+```
+
+## R Markdown
+
+
+```{r load_and_process,include=TRUE,echo=F}
+close_dat=read.csv(paste(file_path,'MASTER Data_2018-2021_Colo&Derm&Stress_v6 (9.12.22).csv',sep=''))
+
+for(j in colnames(close_dat)){
+  if(sum(close_dat[,j]=='#N/A',na.rm=T)>=1){
+    close_dat[close_dat[,j]=='#N/A',j]=NA
+  }
+}
+
+temp_close=close_dat %>% rename(Complete=Completed.in.time,
+                     age=Age..at.time.of.order.,
+                     english=Language.Grp,
+                     race=Race,
+                     payor=Payor.Grp,
+                     edu=Education.Grp,
+                     charlson=Charlson.Score,
+                     completion_date=Date.of.Service,
+                     death_date=Date.of.Expiration,
+                     order_date=Date.of.Order,
+                     referral_cat=Referral.Type,
+                     ord_prov_cat=Ordering.Provider.Type,
+                     order_cat_s=GI.Category,
+                     hispanic=Hispanic.Indication,
+                     visit_cat=Visit.Method,
+                     patientsite_use=Digital.Patient.Engagement...Registered.for.PatientSite.and.viewed.at.least.1.note...Y.N.,
+                     depression=Depression.Indicator..Y.N.
+                     ) %>% 
+  mutate(charlson=as.numeric(charlson),
+         ) %>% 
+  mutate(
+    # english=case_when(english=='ENGLISH'~'Y',
+    #                        english=='UNKNOWN'~'Unknown',
+    #                        T~'N'),
+         
+         race=case_when(race=='WHITE'~'White',
+                        race=='BLACK/AFRICAN AMERICAN'~'Black',
+                        race=='UNKNOWN/NOT SPECIFIED'~'Unknown',
+                        race=='ASIAN'~'Asian',
+                        race=='OTHER RACE'~'Other'),
+         edu=case_when(edu %in% c('< HIGH SCHOOL','HIGH SCHOOL')~'<=High school',
+                             T~edu),
+         charlson=case_when(charlson %in% c(1,2)~'1-2',
+                            charlson==0~'0',
+                            T~'>=3'),
+         depression=case_when(depression==1~'Y',
+                           T~'N'),
+         completion_date=case_when(is.na(completion_date)~as.Date(NA_character_,format='%m/%d/%Y'),
+                                  T~as.Date(completion_date,format='%m/%d/%Y')),
+         death_date=case_when(is.na(death_date)~as.Date(NA_character_,format='%m/%d/%Y'),
+                                  T~as.Date(death_date,format='%m/%d/%Y')),
+         order_date=case_when(is.na(order_date)~as.Date(NA_character_,format='%m/%d/%Y'),
+                                  T~as.Date(order_date,format='%m/%d/%Y')),
+         time_to_completion=completion_date - order_date+1,
+         last_date=case_when(referral_cat=='Colonoscopy'~as.Date('2/07/2022',format='%m/%d/%Y'),
+                             T~as.Date('2/12/2022',format='%m/%d/%Y')),
+         time_to_lastdate=last_date-order_date+1,
+         dead_early=death_date<order_date,
+         time_to_death=death_date-order_date,
+         ord_prov_cat=case_when(ord_prov_cat=='Attending'~'Attending',
+                                ord_prov_cat=='NP'~'NP',
+                                T~'Resident'),
+         order_cat_s=case_when(order_cat_s %in% c('IRON DEFICIENCY ANEMIA','INFERRED LOWER GI BLEEDING')~'bleed',
+                               order_cat_s %in% c('SCREENING','NON-BLEEDING GI')~'Not_bleed',
+                               T~'Unknown'
+                               ),
+         hispanic=case_when(hispanic=='HISPANIC'~'Y',
+                            hispanic=='NOT HISPANIC'~'N',
+                            T~'Unknown'),
+         complete_45=ifelse(time_to_completion<=45&!is.na(time_to_completion),1,0),
+         complete_90=ifelse(time_to_completion<=90&!is.na(time_to_completion),1,0),
+         complete_365=ifelse(time_to_completion<=365&!is.na(time_to_completion),1,0),
+         closure=case_when(referral_cat=='Colonoscopy'&complete_365==1|
+                             referral_cat=='Dermatology'& complete_90==1|
+                             referral_cat=='Stress Test'& complete_45==1~1,
+                           T~0),
+         complete_in_time=case_when((referral_cat=='Colonoscopy'& complete_365==1)|
+                             (referral_cat=='Dermatology'& complete_90==1)|
+                             (referral_cat=='Stress Test'& complete_45==1)~1,
+                           T~0),
+         exclude=case_when((referral_cat=='Colonoscopy'& complete_365!=1 & time_to_lastdate<365)|
+                             (referral_cat=='Dermatology'& complete_90!=1 & time_to_lastdate<90)|
+                             (referral_cat=='Stress Test'& complete_45!=1 & time_to_lastdate<45)~1,
+                           T~0),
+         covid=ifelse(order_date>=as.Date('2020-03-01')&order_date<=as.Date('2021-12-31'),1,0),
+         visit_cat=case_when(visit_cat=='N/A'~'Unknown',
+                             T~visit_cat),
+         complete_intime_cat=case_when(complete_in_time==1~'Y',
+                                       T~'N')
+         ) %>% mutate(
+           race=factor(race),
+           race=relevel(race,ref='White')
+         ) %>% filter(exclude==0)
+
+patient_reg=read.csv(paste(file_path,'Patient Engagement Data 2018-2021_11.1.23.csv',sep=''))
+
+dup_pat_reg=patient_reg %>% group_by(MRN) %>% mutate(n=n()) %>% 
+  filter(n>1) %>% mutate(view=case_when(
+                                   Did.Patient.View.Notes...1.Yes..0.No.=='#N/A'~'0',
+                                   T~Did.Patient.View.Notes...1.Yes..0.No.)) %>% 
+  group_by(MRN) %>% 
+  mutate(view_c=sum(as.numeric(view)),reg_c=sum(Registered.User...1.Yes..0.No.)) %>% dplyr::select(MRN,view_c,reg_c) %>% 
+  unique(.) %>%  mutate(view=ifelse(view_c>=1,1,0),reg=ifelse(reg_c>=1,1,0)) %>% dplyr::select(MRN,view,reg)
+
+undup_pat_reg=patient_reg %>% group_by(MRN) %>% 
+  mutate(n=n()) %>% filter(n==1) %>%
+  mutate(view=case_when(Did.Patient.View.Notes...1.Yes..0.No.=='#N/A'~0,
+                                        Did.Patient.View.Notes...1.Yes..0.No.=='1'~1,
+                                        Did.Patient.View.Notes...1.Yes..0.No.=='0'~0),
+                         reg=Registered.User...1.Yes..0.No.) %>% dplyr::select(MRN,view,reg)
+
+undup_pat_reg=rbind(undup_pat_reg,dup_pat_reg)
+reg_read_mrn=undup_pat_reg %>% filter(reg==1&view==1) %>% pull(MRN) %>% unique(.)
+reg_unread_mrn=undup_pat_reg %>% filter(reg==1&view==0) %>% pull(MRN) %>% unique(.)
+unreg_read_mrn=undup_pat_reg %>% filter(reg==0&view==1) %>% pull(MRN) %>% unique(.)
+unreg_unread_mrn=undup_pat_reg %>% filter(reg==0&view==0) %>% pull(MRN) %>% unique(.)
+
+temp_close=temp_close %>% 
+  mutate(read_reg=case_when(MRN %in% c(reg_read_mrn,unreg_read_mrn)~'Reg&Read',
+                            MRN %in% reg_unread_mrn~'Reg&NoRead',
+                            ## put read and unregistered as registered and read category
+                            #MRN %in% unreg_read_mrn~'NoReg&NoRead',
+                            MRN %in% unreg_unread_mrn~'NoReg&NoRead',
+                            T~'NoReg&NoRead'))
+
+CreateTableOne(vars = c('age','Gender','english','race','hispanic','edu','payor','charlson','depression','Site','ord_prov_cat','visit_cat','COVD.Pre.COVID'),strata=c('read_reg'),data=temp_close) %>% print(showAllLevels=T) %>% write.csv(paste(out_path,'pop_char_read_reg_strat_only.csv',sep=''))
+
+
+CreateTableOne(vars = c('age','Gender','english','race','hispanic','edu','payor','charlson','depression','Site','ord_prov_cat','visit_cat','COVD.Pre.COVID'),strata=c('read_reg','referral_cat'),data=temp_close) %>% print(showAllLevels=T) %>% write.csv(paste(out_path,'pop_char.csv',sep=''))
+
+CreateTableOne(vars = c('age','Gender','english','race','hispanic','edu','payor','charlson','depression','Site','ord_prov_cat','visit_cat','COVD.Pre.COVID'),data=temp_close) %>% print(showAllLevels=T) %>% write.csv(paste(out_path,'overall_char.csv',sep=''))
+
+
+CreateTableOne(vars=c('complete_365'),strata='read_reg',data=temp_close %>% mutate(complete_365=case_when(complete_365==1~'Y',T~'N')) %>% filter(referral_cat=='Colonoscopy')) %>% print(showAllLevels=T) %>% write.csv(paste(out_path,'colonoscopy_tab.csv',sep=''))
+
+CreateTableOne(vars=c('complete_90'),strata='read_reg',data=temp_close %>% mutate(complete_90=case_when(complete_90==1~'Y',T~'N')) %>% filter(referral_cat=='Dermatology')) %>% print(showAllLevels=T) %>% write.csv(paste(out_path,'dermatology_tab.csv',sep=''))
+
+CreateTableOne(vars=c('complete_45'),strata='read_reg',data=temp_close %>% mutate(complete_45=case_when(complete_45==1~'Y',T~'N')) %>% filter(referral_cat=='Stress Test')) %>% print(showAllLevels=T) %>% write.csv(paste(out_path,'stress_test_tab.csv',sep=''))
+
+CreateTableOne(vars=c('closure'),strata='read_reg',data=temp_close %>% mutate(closure=case_when(closure==1~'Y',T~'N'))) %>% print(showAllLevels=T) %>% write.csv(paste(out_path,'overall_closure_tab.csv',sep=''))
+
+
+```
+
+
+```{r analysis_begins,include=TRUE,echo=F}
+
+temp_close=temp_close %>% mutate(english=case_when(english=='ENGLISH'~'English',
+                                        english=='UNKNOWN'~'unknown',
+                                        T~'Other')) 
+
+colonoscopy=temp_close %>% filter(referral_cat=='Colonoscopy')
+derm=temp_close %>% filter(referral_cat=='Dermatology')
+stress=temp_close %>% filter(referral_cat=='Stress Test')
+```
+
+
+## mixed effect models assessment
+
+```{r mixed_model,include=T,echo=F}
+
+
+get_tab=function(fit_colon){
+z1=summary(fit_colon)
+z2=confint(fit_colon)
+fit_col_out=data.frame(cbind(z2[-dim(z2)[1],],p=data.frame(z1$coefficients$cond)[,4]))
+colnames(fit_col_out)[1:2]=c('LCI','UCI')
+fit_col_out %>% mutate(OR=round(exp(Estimate),2),LCI=round(exp(LCI),2),UCI=round(exp(UCI),2),
+                       p=round(p,3)) %>% dplyr::select(-Estimate) %>% mutate(names=rownames(fit_col_out)) %>% return(.)
+}
+
+get_combined_tab=function(fit_colon,fit_colon_adj){
+
+fit1_c=glht(fit_colon,matrix(c(0,-1,1),nrow=1))
+z1s=summary(fit1_c)
+z1=as.vector(confint(fit1_c)$confint)
+fit_colon_tab=get_tab(fit_colon) %>% dplyr::select(names,OR,LCI,UCI,p)
+fit_colon_tab=rbind(fit_colon_tab , (c(names='Reg&Read-Reg&NoRead',OR=round(exp(z1[1]),2),LCI=round(exp(z1[2]),2),UCI=round(exp(z1[3]),2),p=round(z1s$test$pvalues[[1]],3))))
+print(fit_colon_tab)
+
+fit2_c=glht(fit_colon_adj,matrix(c(0,-1,1,rep(0,length(fixef(fit_colon_adj)$cond)-3)),nrow=1))
+z1s=summary(fit2_c)
+z1=as.vector(confint(fit2_c)$confint)
+fit_colon_adj_tab=get_tab(fit_colon_adj)%>% dplyr::select(names,OR,LCI,UCI,p)
+fit_colon_adj_tab=rbind(fit_colon_adj_tab, c(names='Reg&Read-Reg&NoRead',OR=round(exp(z1[1]),2),LCI=round(exp(z1[2]),2),UCI=round(exp(z1[3]),2),p=round(z1s$test$pvalues[[1]],3)))
+
+return(fit_colon_tab %>% full_join(fit_colon_adj_tab,by=c('names'='names')))
+}
+
+fit_colon=glmmTMB(complete_365~read_reg+toep(1|MRN),family=binomial,data=colonoscopy)
+fit_colon_adj=glmmTMB(complete_365~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID+toep(1|MRN),family=binomial,data=colonoscopy)
+fit_colon_null=glmmTMB(complete_365~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,data=colonoscopy)
+anova(fit_colon_adj,fit_colon_null)
+
+get_combined_tab(fit_colon,fit_colon_adj) %>%  write.csv(paste(out_path,'mm_colon_fit.csv',sep=''))
+
+fit_derm=glmmTMB(complete_90~read_reg+toep(1|MRN),family=binomial,data=derm)
+fit_derm_adj=glmmTMB(complete_90~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID+toep(1|MRN),family=binomial,data=derm)
+fit_derm_null=glmmTMB(complete_90~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,data=derm)
+anova(fit_derm_adj,fit_derm_null)
+
+get_combined_tab(fit_derm,fit_derm_adj) %>% write.csv(paste(out_path,'mm_derm_fit.csv',sep=''))
+
+## model failed to converge by using different covariance matrix structures
+fit_stress=glmmTMB(complete_45~read_reg+toep(1|MRN),family=binomial,data=stress %>% filter(english!='unknown'))
+fit_stress_adj=glmmTMB(complete_45~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID+toep(1|MRN),family=binomial,data=stress %>% filter(english!='unknown'))
+fit_stress_null=glmmTMB(complete_45~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,data=stress %>% filter(english!='unknown'))
+anova(fit_stress_null,fit_stress_adj)
+
+get_combined_tab(fit_stress,fit_stress_adj) %>% write.csv(paste(out_path,'mm_stress_fit.csv',sep=''))
+
+
+fit_overall=glmmTMB(closure~read_reg+toep(1|MRN),family=binomial,data=temp_close)
+fit_overall_adj=glmmTMB(closure~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID+toep(1|MRN),family=binomial,data=temp_close)
+fit_overall_null=glmmTMB(closure~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,data=temp_close)
+anova(fit_overall_adj,fit_overall_null)
+
+get_combined_tab(fit_overall,fit_overall_adj) %>%
+  write.csv(paste(out_path,'mm_overall_fit.csv',sep=''))
+
+```
+
+## GEE examine covariance structure choice
+
+```{r gee,include=T,echo=F}
+
+library(geepack)
+## source: https://stackoverflow.com/questions/21221280/confidence-interval-of-coefficients-using-generalized-estimating-equation-gee
+
+confint.geeglm <- function(object, parm, level = 0.95, ...) {
+    cc <- coef(summary(object))
+    mult <- qnorm((1+level)/2)
+    citab <- with(as.data.frame(cc),
+                  cbind(lwr=Estimate-mult*Std.err,
+                        upr=Estimate+mult*Std.err))
+    rownames(citab) <- rownames(cc)
+    citab[parm,]
+}
+
+get_tab=function(fit_colon){
+fit_col_out=data.frame(cbind(estimate=fit_colon$coefficients,confint(fit_colon),p=summary(fit_colon)$coefficients[,4]))
+colnames(fit_col_out)[2:3]=c('LCI','UCI')
+fit_col_out %>% mutate(OR=round(exp(estimate),2),LCI=round(exp(LCI),2),UCI=round(exp(UCI),2),
+                       p=round(p,3)) %>% dplyr::select(-estimate) %>% mutate(names=rownames(fit_col_out)) %>% return(.)
+}
+
+get_combined_tab=function(fit_colon,fit_colon_adj){
+fit1_c=glht(fit_colon,matrix(c(0,-1,1),1))
+z1s=summary(fit1_c)
+z1=as.vector(confint(fit1_c)$confint)
+fit_colon_tab=get_tab(fit_colon) %>% dplyr::select(names,OR,LCI,UCI,p)
+fit_colon_tab=rbind(fit_colon_tab , c(names='Reg&Read-Reg&NoRead',OR=round(exp(z1[1]),2),LCI=round(exp(z1[2]),2),UCI=round(exp(z1[3]),2),p=round(z1s$test$pvalues[[1]],3)))
+
+fit2_c=glht(fit_colon_adj,matrix(c(0,-1,1,rep(0,length(coef(fit_colon_adj))-3)),1))
+z1s=summary(fit2_c)
+z1=as.vector(confint(fit2_c)$confint)
+fit_colon_adj_tab=get_tab(fit_colon_adj)%>% dplyr::select(names,OR,LCI,UCI,p)
+fit_colon_adj_tab=rbind(fit_colon_adj_tab, c(names='Reg&Read-Reg&NoRead',OR=round(exp(z1[1]),2),LCI=round(exp(z1[2]),2),UCI=round(exp(z1[3]),2),p=round(z1s$test$pvalues[[1]],3)))
+
+return(fit_colon_tab %>% full_join(fit_colon_adj_tab,by=c('names'='names')))
+}
+
+fit_colon=geeglm(complete_365~read_reg,id=MRN,family=binomial,data=colonoscopy)
+fit_colon_adj=geeglm(complete_365~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,id=MRN,family=binomial,data=colonoscopy)
+
+get_combined_tab(fit_colon,fit_colon_adj) %>%  write.csv(paste(out_path,'colon_geefit.csv',sep=''))
+
+fit_derm=geeglm(complete_90~read_reg,family=binomial,id=MRN,data=derm)
+fit_derm_adj=geeglm(complete_90~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,id=MRN,data=derm)
+
+get_combined_tab(fit_derm,fit_derm_adj) %>% write.csv(paste(out_path,'derm_geefit.csv',sep=''))
+
+
+fit_stress=geeglm(complete_45~read_reg,family=binomial,id=MRN,data=stress %>% filter(english!='unknown'))
+fit_stress_adj=geeglm(complete_45~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,id=MRN,data=stress %>% filter(english!='unknown'))
+
+get_combined_tab(fit_stress,fit_stress_adj) %>% write.csv(paste(out_path,'stress_geefit.csv',sep=''))
+
+
+fit_overall=geeglm(closure~read_reg,family=binomial,id=MRN,data=temp_close)
+fit_overall_adj=geeglm(closure~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,id=MRN,family=binomial,data=temp_close)
+
+get_combined_tab(fit_overall,fit_overall_adj) %>%
+  write.csv(paste(out_path,'overall_geefit.csv',sep=''))
+
+
+resample <- function(dat, cluster, replace) {
+  
+  # exit early for trivial data
+  if(nrow(dat) == 1 || all(replace==FALSE))
+      return(dat)
+  
+  # sample the clustering factor
+  cls <- sample(unique(dat[[cluster[1]]]), replace=replace[1])
+  
+  # subset on the sampled clustering factors
+  sub <- lapply(cls, function(b) subset(dat, dat[[cluster[1]]]==b))
+  
+  # sample lower levels of hierarchy (if any)
+  if(length(cluster) > 1)
+    sub <- lapply(sub, resample, cluster=cluster[-1], replace=replace[-1])
+  
+  # join and return samples
+  do.call(rbind, sub)
+  
+}
+
+# colon_dat=c()
+# derm_dat=c()
+# stress_dat=c()
+# overall_dat=c()
+# tot_samp=500
+# for(i in 1:tot_samp){
+# colon_samp=resample(colonoscopy,'MRN',T)
+# fit_colon_adj=geeglm(complete_365~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,id=MRN,family=binomial,data=colon_samp)
+# derm_samp=resample(derm,'MRN',T)
+# fit_derm_adj=geeglm(complete_90~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,id=MRN,data=derm_samp)
+# stress_samp=resample(stress %>% filter(english!='unknown'),'MRN',T)
+# fit_stress_adj=geeglm(complete_45~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,id=MRN,data=stress_samp)
+# temp_samp=resample(temp_close,'MRN',T)
+# fit_overall_adj=geeglm(closure~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,id=MRN,family=binomial,data=temp_samp)
+# colon_dat=c(colon_dat,summary(prediction(fit_colon_adj,at=list(read_reg=x_pred),calculate_se = TRUE))[1]$Prediction)
+# derm_dat=c(derm_dat,summary(prediction(fit_derm_adj,at=list(read_reg=x_pred),calculate_se = TRUE))[1]$Prediction)
+# stress_dat=c(stress_dat,summary(prediction(fit_stress_adj,at=list(read_reg=x_pred),calculate_se = TRUE))[1]$Prediction)
+# overall_dat=c(overall_dat,summary(prediction(fit_overall_adj,at=list(read_reg=x_pred),calculate_se = TRUE))[1]$Prediction)
+# if(i %% 25==0){
+#   print(i/tot_samp)
+# }
+# }
+
+
+
+```
+
+
+## logistic reg without random slope
+
+```{r logistic_reg,include=T,echo=F}
+
+get_tab=function(fit_colon){
+fit_col_out=data.frame(cbind(estimate=fit_colon$coefficients,confint(fit_colon),p=summary(fit_colon)$coefficients[,4]))
+colnames(fit_col_out)[2:3]=c('LCI','UCI')
+fit_col_out %>% mutate(OR=round(exp(estimate),2),LCI=round(exp(LCI),2),UCI=round(exp(UCI),2),
+                       p=round(p,3)) %>% dplyr::select(-estimate) %>% mutate(names=rownames(fit_col_out)) %>% return(.)
+}
+
+get_combined_tab=function(fit_colon,fit_colon_adj){
+fit1_c=glht(fit_colon,matrix(c(0,-1,1),1))
+z1s=summary(fit1_c)
+z1=as.vector(confint(fit1_c)$confint)
+fit_colon_tab=get_tab(fit_colon) %>% dplyr::select(names,OR,LCI,UCI,p)
+fit_colon_tab=rbind(fit_colon_tab , c(names='Reg&Read-Reg&NoRead',OR=round(exp(z1[1]),2),LCI=round(exp(z1[2]),2),UCI=round(exp(z1[3]),2),p=round(z1s$test$pvalues[[1]],3)))
+
+fit2_c=glht(fit_colon_adj,matrix(c(0,-1,1,rep(0,length(coef(fit_colon_adj))-3)),1))
+z1s=summary(fit2_c)
+z1=as.vector(confint(fit2_c)$confint)
+fit_colon_adj_tab=get_tab(fit_colon_adj)%>% dplyr::select(names,OR,LCI,UCI,p)
+fit_colon_adj_tab=rbind(fit_colon_adj_tab, c(names='Reg&Read-Reg&NoRead',OR=round(exp(z1[1]),2),LCI=round(exp(z1[2]),2),UCI=round(exp(z1[3]),2),p=round(z1s$test$pvalues[[1]],3)))
+
+return(fit_colon_tab %>% full_join(fit_colon_adj_tab,by=c('names'='names')))
+}
+
+## a lot of the followings will give false warnings. No perfect separation is seen. 
+## Only stress test may have perfect separation. However, the result(same 
+## point estimate is obtained) is not different after removal of unknown english speakers.
+
+fit_colon=glm(complete_365~read_reg,family=binomial,data=colonoscopy)
+fit_colon_adj=glm(complete_365~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,data=colonoscopy)
+
+sim_colon=simulateResiduals(fit_colon_adj,plot=F)
+plot(sim_colon)
+testDispersion(sim_colon)
+testZeroInflation(sim_colon)
+plotResiduals(sim_colon,colonoscopy$read_reg)
+plotResiduals(sim_colon,colonoscopy$age,quantreg = T)
+plotResiduals(sim_colon,colonoscopy$Gender)
+plotResiduals(sim_colon,colonoscopy$english)
+plotResiduals(sim_colon,colonoscopy$race)
+plotResiduals(sim_colon,colonoscopy$hispanic)
+plotResiduals(sim_colon,colonoscopy$payor)
+plotResiduals(sim_colon,colonoscopy$edu)
+plotResiduals(sim_colon,colonoscopy$charlson)
+plotResiduals(sim_colon,colonoscopy$depression)
+plotResiduals(sim_colon,colonoscopy$Site)
+plotResiduals(sim_colon,colonoscopy$ord_prov_cat)
+plotResiduals(sim_colon,colonoscopy$visit_cat)
+plotResiduals(sim_colon,colonoscopy$COVD.Pre.COVID)
+
+get_combined_tab(fit_colon,fit_colon_adj) %>%  write.csv(paste(out_path,'colon_fit.csv',sep=''))
+
+fit_derm=glm(complete_90~read_reg,family=binomial,data=derm)
+fit_derm_adj=glm(complete_90~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,data=derm)
+
+sim_derm=simulateResiduals(fit_derm_adj,plot=F)
+plot(sim_derm)
+testDispersion(sim_derm)
+testZeroInflation(sim_derm)
+plotResiduals(sim_derm,derm$read_reg)
+plotResiduals(sim_derm,derm$age,quantreg = T)
+plotResiduals(sim_derm,derm$Gender)
+plotResiduals(sim_derm,derm$english)
+plotResiduals(sim_derm,derm$race)
+plotResiduals(sim_derm,derm$hispanic)
+plotResiduals(sim_derm,derm$payor)
+plotResiduals(sim_derm,derm$edu)
+plotResiduals(sim_derm,derm$charlson)
+plotResiduals(sim_derm,derm$depression)
+plotResiduals(sim_derm,derm$Site)
+plotResiduals(sim_derm,derm$ord_prov_cat)
+plotResiduals(sim_derm,derm$visit_cat)
+plotResiduals(sim_derm,derm$COVD.Pre.COVID)
+
+get_combined_tab(fit_derm,fit_derm_adj) %>% write.csv(paste(out_path,'derm_fit.csv',sep=''))
+
+
+fit_stress=glm(complete_45~read_reg,family=binomial,data=stress %>% filter(english!='unknown'))
+fit_stress_adj=glm(complete_45~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,data=stress %>% filter(english!='unknown'))
+
+sim_stress=simulateResiduals(fit_stress_adj,plot=F)
+plot(sim_stress)
+testDispersion(sim_stress)
+testZeroInflation(sim_stress)
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(read_reg))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(age),quantreg = T)
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(Gender))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(english))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(race))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(hispanic))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(payor))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(edu))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(charlson))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(depression))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(Site))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(ord_prov_cat))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(visit_cat))
+plotResiduals(sim_stress,stress %>% filter(english!='unknown') %>% pull(COVD.Pre.COVID))
+
+get_combined_tab(fit_stress,fit_stress_adj) %>% write.csv(paste(out_path,'stress_fit.csv',sep=''))
+
+
+fit_overall=glm(closure~read_reg,family=binomial,data=temp_close)
+fit_overall_adj=glm(closure~read_reg+age+Gender+english+race+hispanic+payor+edu+charlson+depression+Site+ord_prov_cat+visit_cat +COVD.Pre.COVID,family=binomial,data=temp_close)
+
+sim_overall=simulateResiduals(fit_overall_adj,plot=F)
+plot(sim_overall)
+testDispersion(sim_overall)
+testZeroInflation(sim_overall)
+plotResiduals(sim_overall,temp_close$read_reg)
+plotResiduals(sim_overall,temp_close$age,quantreg = T)
+plotResiduals(sim_overall,temp_close$Gender)
+plotResiduals(sim_overall,temp_close$english)
+plotResiduals(sim_overall,temp_close$race)
+plotResiduals(sim_overall,temp_close$hispanic)
+plotResiduals(sim_overall,temp_close$payor)
+plotResiduals(sim_overall,temp_close$edu)
+plotResiduals(sim_overall,temp_close$charlson)
+plotResiduals(sim_overall,temp_close$depression)
+plotResiduals(sim_overall,temp_close$Site)
+plotResiduals(sim_overall,temp_close$ord_prov_cat)
+plotResiduals(sim_overall,temp_close$visit_cat)
+plotResiduals(sim_overall,temp_close$COVD.Pre.COVID)
+
+get_combined_tab(fit_overall,fit_overall_adj) %>%
+  write.csv(paste(out_path,'overall_fit.csv',sep=''))
+
+
+
+library(margins)
+library(prediction)
+
+x_pred=c('NoReg&NoRead','Reg&NoRead','Reg&Read')
+
+colon_pred=summary(prediction(fit_colon_adj,at=list(read_reg=x_pred),calculate_se = TRUE))
+derm_pred=summary(prediction(fit_derm_adj,at=list(read_reg=x_pred),calculate_se = TRUE))
+stress_pred=summary(prediction(fit_stress_adj,at=list(read_reg=x_pred),calculate_se = TRUE))
+overall_pred=summary(prediction(fit_overall_adj,at=list(read_reg=x_pred),calculate_se = TRUE))
+
+get_predictive_probs=function(colon_pred,procedure='colonoscopy'){ 
+colon_pred %>% rename(read_reg=`at(read_reg)`,me=Prediction,L95=lower,U95=upper) %>%
+     mutate(proc=procedure) %>% return(.)
+}
+
+pred_prob_dat=rbind(get_predictive_probs(colon_pred,'Colonoscopy'),
+      get_predictive_probs(derm_pred,'Dematology'),
+      get_predictive_probs(stress_pred,'Stress Test'),
+      get_predictive_probs(overall_pred,'All test/referrals'))
+
+write.csv(pred_prob_dat,paste(out_path,'all_pred_prob_used_plot.csv',sep=''))
+
+p1=ggplot(pred_prob_dat %>% mutate(proc=case_when(proc=='Colonoscopy'~'Colonoscopy',
+                                               proc=='All test/referrals'~'All Tests/Referrals',
+                                               proc=='Dematology'~'Dermatology Referral',
+                                               proc=='Stress Test'~'Stress Test')) %>% 
+                                  mutate(proc=factor(proc,levels=c('Colonoscopy',
+                                                                   'Dermatology Referral',
+                                                                   'Stress Test','All Tests/Referrals'))),
+       aes(x=proc,y=me*100,group=read_reg))+geom_bar(aes(fill=read_reg),colour='black',stat='identity',position = 'dodge',width = 0.5)+ 
+  scale_fill_manual(values=c('darkgray','azure3','white')
+                    ,breaks=c('NoReg&NoRead','Reg&NoRead','Reg&Read'),
+                    labels=c('No Portal','Portal Only','Portal + Notes'))+
+  geom_errorbar(aes(ymin=L95*100,ymax=U95*100),stat = 'identity',
+                position=position_dodge(0.5),width=0.2)+
+  theme_bw()+ylim(c(0,100))+ylab('Predictive Probability of Loop Closure (%)')+xlab('')+labs(fill='')+
+  theme(legend.justification = 'right',legend.direction = 'vertical',
+        axis.title.y=element_text(size=15),
+        axis.text=element_text(size=12,face='bold'))
+
+p1
+
+ggsave(plot=print(p1),filename=paste(out_path,'figure.eps',sep=''),device=cairo_ps,height=12,width=12,dpi=600)
+
+ggsave(plot=p1,filename=paste(out_path,'figure.tif',sep=''),device='tiff',height=10,width=10,dpi=600)
+
+
+fit_colon_adj_mar=margins(fit_colon_adj,type='response',variable='read_reg')
+fit_derm_adj_mar=margins(fit_derm_adj,type='response',variable='read_reg')
+fit_stress_adj_mar=margins(fit_stress_adj,type='response',variable='read_reg')
+fit_overall_adj_mar=margins(fit_overall_adj,type='response',variable='read_reg')
+
+get_me_margins_contrasts=function(fit_colon_adj_mar,proc='colonoscopy'){
+colon_mar=data.frame(summary(fit_colon_adj_mar)) %>% dplyr::select(-c(SE,z))
+v_colon=matrix(c(-1,1),nrow=1) %*% vcov(fit_colon_adj_mar) %*% matrix(c(-1,1),ncol=1)
+pchisq((as.numeric(colon_mar[2,2]-colon_mar[1,2])/sqrt(v_colon))^2,1,lower.tail = F)
+point_est=as.numeric(colon_mar[2,2]-colon_mar[1,2])
+
+cutoff_95=qnorm(0.975)
+rbind(colon_mar,
+data.frame(factor='Reg&Read-Reg&NoRead',AME=round(as.numeric(colon_mar[2,2]-colon_mar[1,2]),4),p=pchisq((as.numeric(colon_mar[2,2]-colon_mar[1,2])/sqrt(v_colon))^2,1,lower.tail = F),lower=point_est-cutoff_95*sqrt(v_colon),upper=point_est+cutoff_95*sqrt(v_colon))) %>% mutate(AME=round(AME,3),p=round(p,3),lower=round(lower,3),upper=round(upper,3),
+                                                                                                                                                                                                                                                                       proc=proc) %>% return(.)
+}
+
+
+get_me_margins_contrasts(fit_colon_adj_mar,'colonoscopy') %>% write.csv(paste(out_path,'colon_predic_prob.csv',sep=''))
+get_me_margins_contrasts(fit_derm_adj_mar,'dermatology') %>%
+write.csv(paste(out_path,'derm_predic_prob.csv',sep=''))
+get_me_margins_contrasts(fit_stress_adj_mar,'stress test') %>%
+write.csv(paste(out_path,'stress_predic_prob.csv',sep=''))
+get_me_margins_contrasts(fit_overall_adj_mar,'overall') %>%
+write.csv(paste(out_path,'overall_predic_prob.csv',sep=''))
+
+
+```
+
+
+
+
