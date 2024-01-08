@@ -250,7 +250,8 @@ get_combined_tab(fit_overall,fit_overall_adj) %>%
 
 ```
 
-## GEE examine covariance structure choice
+## GEE 
+
 
 ```{r gee,include=T,echo=F}
 
@@ -363,7 +364,7 @@ resample <- function(dat, cluster, replace) {
 ```
 
 
-## logistic reg without random slope
+## logistic reg 
 
 ```{r logistic_reg,include=T,echo=F}
 
